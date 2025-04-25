@@ -1,0 +1,141 @@
+clear; clc;
+
+% --- Πραγματικές Παράμετροι ---
+m_true = 1.315; 
+b_true = 0.225; 
+k_true = 0.725;
+
+% --- Feedback όροι ---
+theta_m1 = 56;
+theta_m2 = 1;
+
+% --- Learning rates ---
+gamma_m = 5;
+gamma_b = 10;
+gamma_k = 5;
+
+% --- Φίλτρο ---
+a = 10;
+
+% --- Άλλες Ρυθμίσεις ---
+tspan = [0 20];
+u_type = "sine";
+
+% --- Πλάτη Θορύβου που θα δοκιμάσουμε ---
+noise_levels = linspace(0, 0.5, 20);   % από 0 έως 0.5
+errors_m = zeros(size(noise_levels));
+errors_b = zeros(size(noise_levels));
+errors_k = zeros(size(noise_levels));
+
+for i = 1:length(noise_levels)
+    eta0 = noise_levels(i);
+    
+    % --- Αρχικές Συνθήκες ---
+    x0 = zeros(13,1);
+    x0(11) = 1.5;   % m_hat αρχική
+    x0(12) = 0.05;  % b_hat αρχική
+    x0(13) = 0.533; % k_hat αρχική
+
+    opts = odeset('RelTol',1e-6, 'AbsTol',1e-8);
+    [t, X] = ode45(@(t,x) lyap_mixed_noise_dynamics(t,x,m_true,b_true,k_true,a,...
+        gamma_m,gamma_b,gamma_k,theta_m1,theta_m2,u_type,eta0), tspan, x0, opts);
+
+    theta_hat = X(:,11:13);
+
+    m_hat = theta_hat(end,1);
+    b_hat = theta_hat(end,2);
+    k_hat = theta_hat(end,3);
+
+    errors_m(i) = abs(m_hat - m_true);
+    errors_b(i) = abs(b_hat - b_true);
+    errors_k(i) = abs(k_hat - k_true);
+end
+
+% --- Σχεδίαση ---
+figure;
+plot(noise_levels, errors_m, '-o', 'LineWidth', 2); hold on;
+plot(noise_levels, errors_b, '-s', 'LineWidth', 2);
+plot(noise_levels, errors_k, '-d', 'LineWidth', 2);
+grid on;
+xlabel('Πλάτος Θορύβου \eta_0');
+ylabel('Σφάλμα Εκτίμησης');
+title('Σφάλμα Εκτίμησης Παραμέτρων vs Πλάτος Θορύβου (Μεικτή Τοπολογία)');
+legend('Σφάλμα m̂', 'Σφάλμα b̂', 'Σφάλμα k̂', 'Location', 'northwest');
+function dx = lyap_mixed_noise_dynamics(t, x, m, b, k, a, gamma_m, gamma_b, gamma_k, tm1, tm2, u_type, eta0)
+
+    % --- Καταστάσεις ---
+    x1 = x(1); 
+    x2 = x(2);
+    x1_hat = x(3); 
+    x2_hat = x(4);
+    z0 = x(5); dz0 = x(6);
+    z1 = x(7); dz1 = x(8);
+    vu = x(9); dvu = x(10);
+    m_hat = x(11); 
+    b_hat = x(12); 
+    k_hat = x(13);
+
+    % --- Είσοδος ---
+    switch u_type
+        case "sine"
+            u = 2.5 * sin(t);
+        otherwise
+            u = 0;
+    end
+
+    % --- Πραγματικό σύστημα ---
+    noise = eta0 * sin(2*pi*20*t);    % θόρυβος
+    dx1 = x2;
+    dx2 = (1/m)*(u - b*x2 - k*x1);
+
+    % --- Μετρημένη Έξοδος με Θόρυβο ---
+    x1_noisy = x1 + noise;
+
+    % --- Σφάλματα ---
+    ex1 = x1_noisy - x1_hat;
+    ex2 = x2 - x2_hat;
+
+    % --- Εκτιμητής με μεικτή τοπολογία ---
+    m_hat = max(m_hat, 0.05);
+    dx1_hat = x2_hat;
+    dx2_hat = (1/m_hat)*(u - b_hat*x2 - k_hat*x1) + tm1*ex1 + tm2*ex2;
+
+    % --- Φίλτρα ---
+    ddz0 = a^2 * x1_noisy - 2*a*dz0 - a^2*z0;
+    ddz1 = a^2 * x2 - 2*a*dz1 - a^2*z1;
+    ddvu = a^2 * u  - 2*a*dvu - a^2*vu;
+
+    % --- Ενημέρωση Παραμέτρων ---
+    alpha = 0.8;
+    beta  = 0.2;
+    e_m = alpha * ex2 + beta * ex1;
+    dm_hat = gamma_m * e_m * vu;
+    db_hat = -gamma_b * ex2 * z1;
+    dk_hat = -gamma_k * ex1 * z0;
+
+    % --- Περιορισμός αλλαγών ---
+    dm_hat = max(min(dm_hat, 0.5), -0.5);
+    db_hat = max(min(db_hat, 0.5), -0.5);
+    dk_hat = max(min(dk_hat, 0.5), -0.5);
+
+    % --- Clamp ---
+    m_hat_new = max(min(m_hat + dm_hat, 5), 0.1);
+    b_hat_new = max(min(b_hat + db_hat, 5), 0);
+    k_hat_new = max(min(k_hat + dk_hat, 5), 0);
+
+    % --- Παράγωγοι καταστάσεων ---
+    dx = zeros(13,1);
+    dx(1) = dx1;
+    dx(2) = dx2;
+    dx(3) = dx1_hat;
+    dx(4) = dx2_hat;
+    dx(5) = dz0;
+    dx(6) = ddz0;
+    dx(7) = dz1;
+    dx(8) = ddz1;
+    dx(9) = dvu;
+    dx(10) = ddvu;
+    dx(11) = m_hat_new - m_hat;
+    dx(12) = b_hat_new - b_hat;
+    dx(13) = k_hat_new - k_hat;
+end
